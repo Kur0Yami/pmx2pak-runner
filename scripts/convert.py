@@ -15,6 +15,10 @@ yang ketemu dicetak ke log. Kalau export gagal, lihat bagian "RE OPS" di convert
 import sys, os, json, re, argparse, traceback
 import bpy, bmesh, addon_utils
 
+_um = os.path.join(os.environ.get("BLENDER_USER_SCRIPTS", ""), "modules")
+if os.path.isdir(_um) and _um not in sys.path:
+    sys.path.insert(0, _um)
+
 
 def parse():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
@@ -23,6 +27,7 @@ def parse():
     ap.add_argument("--out"); ap.add_argument("--parts", default="helm,body,arm,waist,leg")
     ap.add_argument("--scale", type=float, default=0.08); ap.add_argument("--hide", default="")
     ap.add_argument("--re-addon", default=""); ap.add_argument("--dump-only", default="false")
+    ap.add_argument("--multi-material", action="store_true")
     return ap.parse_args(argv)
 
 
@@ -73,7 +78,24 @@ def list_re_ops():
 
 
 def clear_scene():
-    bpy.ops.wm.read_factory_settings(use_empty=True)
+    for o in list(bpy.data.objects):
+        bpy.data.objects.remove(o, do_unlink=True)
+    for c in list(bpy.data.collections):
+        bpy.data.collections.remove(c)
+    for blk in (bpy.data.meshes, bpy.data.armatures, bpy.data.materials, bpy.data.images):
+        for d in list(blk):
+            blk.remove(d)
+
+
+def dump_scene(tag):
+    log("=== SCENE", tag, "===")
+    def walk(c, depth=0):
+        objs = [f"{o.name}({o.type})" for o in c.objects]
+        log("  " * depth + f"[{c.name}]", objs[:12], f"+{max(0, len(objs) - 12)}" if len(objs) > 12 else "")
+        for ch in c.children:
+            walk(ch, depth + 1)
+    walk(bpy.context.scene.collection)
+    log("materials:", [m.name for m in bpy.data.materials][:30])
 
 
 def import_pmx(pmx_dir, scale, hide):
@@ -216,10 +238,14 @@ def tex_stem(m):
     return m.name if m else "none"
 
 
-def assign_materials(obj, template):
+def assign_materials(obj, template, single=True):
     """satu material RE per tekstur PMX (salinan material ref 'ALL')."""
     base = template.data.materials[0]
     log("props material ref:", base.name, list(base.keys()))
+    if single:  # mode uji: pakai material ref apa adanya supaya .mdf2 asli tetap valid
+        obj.data.materials.clear()
+        obj.data.materials.append(base)
+        return {i: 0 for i in range(max(1, len(set(p.material_index for p in obj.data.polygons)) + 64))}, [base.name]
     slot_group = [tex_stem(m) for m in obj.data.materials]
     names = []
     for g in slot_group:
@@ -249,21 +275,23 @@ def main():
         raise SystemExit("mmd_tools tidak termuat (lihat log enable di atas)")
     imp = find_op("re_mesh", r"^importfile$")
     exp = find_op("re_mesh", r"^exportfile$")
-    if not imp:
-        raise SystemExit("Operator import RE mesh tidak ketemu, cek bagian RE OPS")
-    describe("re_mesh.importfile", imp); describe("re_mesh.exportfile", exp)
-    for ns, nm in (("re_mdf", "importfile"), ("re_mdf", "exportfile"), ("re_tex", "convert_tex_dds_files"),
-                   ("re_mesh", "create_mesh_collection"), ("re_mdf", "replace_texture_bindings")):
-        try:
-            describe(f"{ns}.{nm}", getattr(getattr(bpy.ops, ns), nm))
-        except Exception as e:
-            log("skip describe", ns, nm, e)
+    if not imp or not exp:
+        raise SystemExit("Operator import/export RE mesh tidak ketemu, cek bagian RE OPS")
+
+    # salin dulu seluruh natives mod ref ke out (mesh baru nanti menimpa), supaya tekstur/chain/mdf2 ikut
+    import shutil
+    src_root = os.path.join(a.ref_dir, "natives")
+    dst_root = os.path.join(a.out, "natives")
+    if os.path.isdir(src_root) and a.dump_only.lower() != "true":
+        shutil.copytree(src_root, dst_root, dirs_exist_ok=True)
+        log("natives ref disalin ke", dst_root)
 
     # --- pass 1: dump bone ref ---
     for p in wanted:
         ref_path = os.path.join(a.ref_dir, parts_ref[p])
-        clear_scene(); enable("mmd_tools"); enable(a.re_addon)
-        imp(filepath=ref_path)
+        clear_scene()
+        log("import ref (armature saja):", ref_path); sys.stdout.flush()
+        imp(filepath=ref_path, importArmatureOnly=True)
         bones = sorted({b.name for o in bpy.context.scene.objects if o.type == "ARMATURE" for b in o.data.bones})
         open(os.path.join(a.out, f"ref_bones_{p}.txt"), "w", encoding="utf-8").write("\n".join(bones))
         log(f"ref {p}: {len(bones)} bone")
@@ -271,34 +299,43 @@ def main():
         log("dump_only selesai"); return
 
     # --- pass 2: konversi ---
-    clear_scene(); enable("mmd_tools")
+    clear_scene()
     meshes, _ = import_pmx(a.pmx_dir, a.scale, a.hide)
     big = join_meshes(meshes)
     new_parts = split_parts(big, bm_cfg["parts"], wanted)
-    # simpan geometri tiap bagian ke file blend sementara supaya scene ref bersih
     tmp = os.path.join(a.out, "_new_parts.blend")
     bpy.ops.wm.save_as_mainfile(filepath=tmp)
+    PARENTS_SAVED = dict(PARENTS)
 
     for p, new_obj in new_parts.items():
         ref_path = os.path.join(a.ref_dir, parts_ref[p])
-        clear_scene(); enable("mmd_tools"); enable(a.re_addon)
-        # ambil objek bagian ini dari file sementara
+        clear_scene()
         with bpy.data.libraries.load(tmp, link=False) as (src, dst):
             dst.objects = [f"new_{p}"]
         nobj = dst.objects[0]
-        bpy.context.collection.objects.link(nobj)
-        imp(filepath=ref_path)
-        arm = next(o for o in bpy.context.scene.objects if o.type == "ARMATURE")
+        bpy.context.scene.collection.objects.link(nobj)
+        log("import ref lengkap:", ref_path); sys.stdout.flush()
+        imp(filepath=ref_path, loadMaterials=True, loadMDFData=True, loadUnusedTextures=False,
+            importShadowMeshes=False, importBlendShapes=False, clearScene=False)
+        dump_scene("setelah import ref " + p)
+        arms = [o for o in bpy.context.scene.objects if o.type == "ARMATURE"]
+        if not arms:
+            raise SystemExit("armature ref tidak ada")
+        arm = arms[0]
         ref_meshes = [o for o in bpy.context.scene.objects if o.type == "MESH" and o is not nobj]
+        if not ref_meshes:
+            raise SystemExit("mesh ref tidak ada")
         template = ref_meshes[0]
         valid = {b.name for b in arm.data.bones}
+        PARENTS.clear(); PARENTS.update(PARENTS_SAVED)
         remap_groups(nobj, bm_cfg["bones"], valid, bm_cfg.get("fallback", {}).get(p) or sorted(valid)[0])
-        # material + nama + collection milik ref
+
         old_idx = [f.material_index for f in nobj.data.polygons]
-        remap, mat_names = assign_materials(nobj, template)
+        remap, mat_names = assign_materials(nobj, template, single=not a.multi_material)
         for f, oi in zip(nobj.data.polygons, old_idx):
             f.material_index = remap.get(oi, 0)
         log(f"{len(mat_names)} material RE:", mat_names)
+
         col = template.users_collection[0]
         old_name = template.name
         for o in ref_meshes:
@@ -311,25 +348,18 @@ def main():
         for mod in list(nobj.modifiers):
             nobj.modifiers.remove(mod)
         nobj.modifiers.new("Armature", "ARMATURE").object = arm
-        # bersihkan custom normals/doubles ringan
-        bpy.context.view_layer.objects.active = nobj
-        log(f"export {p} ...")
-        try:
-            # operator export milik addon membaca collection aktif; path tujuan ikut struktur ref
-            bpy.context.view_layer.active_layer_collection = bpy.context.view_layer.layer_collection.children.get(col.name) or bpy.context.view_layer.layer_collection
-            res = exp()
-            log("export result:", res)
-        except Exception:
-            traceback.print_exc()
-            log("EXPORT GAGAL untuk", p)
+        dump_scene("sebelum export " + p)
 
-    # salin hasil export ke out/natives (addon biasanya menulis di samping path ref)
-    import shutil
-    src_root = os.path.join(a.ref_dir, "natives")
-    dst_root = os.path.join(a.out, "natives")
-    if os.path.isdir(src_root):
-        shutil.copytree(src_root, dst_root, dirs_exist_ok=True)
-        log("natives disalin ke", dst_root)
+        mesh_col = next((c for c in bpy.data.collections if ".mesh" in c.name), None)
+        outpath = os.path.join(a.out, parts_ref[p])
+        os.makedirs(os.path.dirname(outpath), exist_ok=True)
+        log("export", p, "->", outpath, "| collection:", mesh_col.name if mesh_col else None); sys.stdout.flush()
+        kw = dict(filepath=outpath, selectedOnly=False)
+        if mesh_col:
+            kw["targetCollection"] = mesh_col.name
+        res = exp(**kw)
+        log("export result:", res, "| ada file:", os.path.exists(outpath))
+    log("SELESAI. mdf2 asli dipakai (mode material tunggal)" if not a.multi_material else "SELESAI (multi material, mdf2 belum diupdate!)")
 
 
 if __name__ == "__main__":
