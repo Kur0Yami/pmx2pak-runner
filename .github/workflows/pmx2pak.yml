@@ -24,6 +24,12 @@ on:
       hide_materials:
         description: "Nama material PMX yang dibuang, pisah koma (opsional)"
         default: ""
+      fit_height:
+        description: "Skalakan model supaya tinggi kepala = skeleton Rise"
+        default: "true"
+      z_offset:
+        description: "Geser vertikal (meter) setelah telapak di z=0; positif = naik"
+        default: "0"
       dump_only:
         description: "true = cuma dump daftar bone ref (buat isi bonemap.json), tidak export"
         type: boolean
@@ -118,6 +124,8 @@ jobs:
             --scale "${{ inputs.scale }}" \
             --hide "${{ inputs.hide_materials }}" \
             --re-addon "$RE_ADDON" \
+            --fit "${{ inputs.fit_height }}" \
+            --z-offset "${{ inputs.z_offset }}" \
             --dump-only "${{ inputs.dump_only }}" 2>&1 | tee out/convert.log
 
       - name: Ambil crash log Blender (kalau ada)
