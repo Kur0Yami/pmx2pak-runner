@@ -26,6 +26,9 @@ def parse():
     return ap.parse_args(argv)
 
 
+PARENTS = {}
+
+
 def log(*a):
     print("[pmx2pak]", *a, flush=True)
 
@@ -73,6 +76,9 @@ def import_pmx(pmx_dir, scale, hide):
                                    clean_model=True, remove_doubles=False)
     meshes = [o for o in bpy.context.scene.objects if o.type == "MESH"]
     arm = next((o for o in bpy.context.scene.objects if o.type == "ARMATURE"), None)
+    if arm:
+        PARENTS.update({b.name: (b.parent.name if b.parent else None) for b in arm.data.bones})
+        log("PMX bone:", len(PARENTS))
     hide_set = {h.strip() for h in hide.split(",") if h.strip()}
     for o in meshes:
         if hide_set:
@@ -110,6 +116,11 @@ def dominant_part(obj, face, rules):
 
 
 def split_parts(obj, rules, wanted):
+    if len(wanted) == 1:  # mod satu-mesh (mis. f_wst279): semua faces masuk satu bagian
+        dup = obj.copy(); dup.data = obj.data.copy(); dup.name = f"new_{wanted[0]}"
+        bpy.context.collection.objects.link(dup)
+        log(f"part {wanted[0]}: {len(dup.data.polygons)} faces (semua)")
+        return {wanted[0]: dup}
     bm = bmesh.new(); bm.from_mesh(obj.data); bm.faces.ensure_lookup_table()
     assign = {p: [] for p in wanted}
     unassigned = 0
@@ -137,23 +148,73 @@ def split_parts(obj, rules, wanted):
     return result
 
 
+MAX_W = 6
+
+
 def remap_groups(obj, bones_map, valid_bones, fallback):
-    """rename/merge vertex group MMD -> bone Rise. Yang tak terpetakan -> fallback bone."""
-    miss = set()
+    """MMD vertex group -> bone Rise. Bone tak terpetakan: naik lewat parent MMD sampai ketemu yang terpetakan."""
+    cache = {}
+
+    def resolve(n):
+        if n in cache:
+            return cache[n]
+        t, seen = None, set()
+        m = n
+        while m and m not in seen:
+            seen.add(m)
+            c = bones_map.get(m) or ""
+            if c in valid_bones:
+                t = c; break
+            m = PARENTS.get(m)
+        cache[n] = t or fallback
+        return cache[n]
+
+    gname = {vg.index: vg.name for vg in obj.vertex_groups}
+    per_v = []
+    for v in obj.data.vertices:
+        acc = {}
+        for g in v.groups:
+            if g.weight <= 0:
+                continue
+            t = resolve(gname[g.group])
+            acc[t] = acc.get(t, 0.0) + g.weight
+        top = sorted(acc.items(), key=lambda kv: -kv[1])[:MAX_W]
+        tot = sum(w for _, w in top) or 1.0
+        per_v.append([(t, w / tot) for t, w in top])
     for vg in list(obj.vertex_groups):
-        tgt = bones_map.get(vg.name) or ""
-        if tgt not in valid_bones:
-            miss.add(vg.name); tgt = fallback
-        if tgt == vg.name:
-            continue
-        dst = obj.vertex_groups.get(tgt) or obj.vertex_groups.new(name=tgt)
-        for v in obj.data.vertices:
-            for g in v.groups:
-                if g.group == vg.index:
-                    dst.add([v.index], g.weight, "ADD")
         obj.vertex_groups.remove(vg)
-    if miss:
-        log(f"  {len(miss)} bone MMD tak terpetakan -> {fallback}:", sorted(miss)[:20])
+    groups = {}
+    for vi, lst in enumerate(per_v):
+        for t, w in lst:
+            vg = groups.get(t) or groups.setdefault(t, obj.vertex_groups.new(name=t))
+            vg.add([vi], w, "REPLACE")
+    unmapped = sorted(n for n in gname.values() if resolve(n) == fallback and not (bones_map.get(n) or ""))
+    log(f"  vertex group baru: {len(groups)} bone Rise; {len(unmapped)} bone MMD jatuh ke fallback", unmapped[:15])
+
+
+def tex_stem(m):
+    if m and m.node_tree:
+        for n in m.node_tree.nodes:
+            if n.type == "TEX_IMAGE" and n.image:
+                return os.path.splitext(os.path.basename(n.image.filepath.replace("\\", "/")))[0]
+    return m.name if m else "none"
+
+
+def assign_materials(obj, template):
+    """satu material RE per tekstur PMX (salinan material ref 'ALL')."""
+    base = template.data.materials[0]
+    log("props material ref:", base.name, list(base.keys()))
+    slot_group = [tex_stem(m) for m in obj.data.materials]
+    names = []
+    for g in slot_group:
+        if g not in names:
+            names.append(g)
+    obj.data.materials.clear()
+    for g in names:
+        mm = base.copy(); mm.name = g
+        obj.data.materials.append(mm)
+    old = {i: names.index(g) for i, g in enumerate(slot_group)}
+    return old, names
 
 
 def main():
@@ -208,11 +269,11 @@ def main():
         valid = {b.name for b in arm.data.bones}
         remap_groups(nobj, bm_cfg["bones"], valid, bm_cfg.get("fallback", {}).get(p) or sorted(valid)[0])
         # material + nama + collection milik ref
-        nobj.data.materials.clear()
-        for m in template.data.materials:
-            nobj.data.materials.append(m)
-        for f in nobj.data.polygons:
-            f.material_index = 0
+        old_idx = [f.material_index for f in nobj.data.polygons]
+        remap, mat_names = assign_materials(nobj, template)
+        for f, oi in zip(nobj.data.polygons, old_idx):
+            f.material_index = remap.get(oi, 0)
+        log(f"{len(mat_names)} material RE:", mat_names)
         col = template.users_collection[0]
         old_name = template.name
         for o in ref_meshes:
