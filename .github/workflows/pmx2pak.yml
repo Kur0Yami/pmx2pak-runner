@@ -6,15 +6,18 @@ name: pmx2pak
 on:
   workflow_dispatch:
     inputs:
-      model_zip:
-        description: "Zip PMX + tekstur (path di repo)"
-        default: "input/model.zip"
+      model_url:
+        description: "URL zip PMX + tekstur (repo publik)"
+        default: "https://github.com/Kur0Yami/mhgu-appearance-runner/raw/main/models/hiyuki.zip"
+      natives_url:
+        description: "URL mod natives (zip/7z) yang dipakai sebagai referensi"
+        default: "https://github.com/Kur0Yami/MODS/raw/main/input/hiyuki.zip"
       set_name:
         description: "Nama set (dipakai buat nama file output)"
-        default: "guild_custom"
+        default: "hiyuki_new"
       parts:
-        description: "Bagian armor, pisah koma (harus ada di ref/parts.json)"
-        default: "helm,body,arm,waist,leg"
+        description: "Bagian yang diganti (mod hiyuki: cukup wst)"
+        default: "wst"
       scale:
         description: "Skala PMX -> meter (MMD standar ~0.08)"
         default: "0.08"
@@ -44,11 +47,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Siapkan input
+      - name: Download input dari URL
         run: |
-          mkdir -p work/model out
-          7z x "${{ inputs.model_zip }}" -owork/model -y > /dev/null
-          find work/model -iname "*.pmx" | head
+          mkdir -p work/model work/nat out
+          curl -fL --retry 3 -o work/model.bin "${{ inputs.model_url }}"
+          curl -fL --retry 3 -o work/nat.bin "${{ inputs.natives_url }}"
+          7z x work/model.bin -owork/model -y > /dev/null
+          7z x work/nat.bin -owork/nat -y > /dev/null
+          cp -r work/nat/* ref/
+          echo "PMX:"; find work/model -iname "*.pmx"
+          echo "ref:"; find ref -type f | head -40
           test -f ref/parts.json || { echo "::error::ref/parts.json belum ada"; exit 1; }
 
       - name: Install Blender (portable)
@@ -93,7 +101,8 @@ jobs:
         if: ${{ !inputs.dump_only }}
         run: |
           test -d out/natives || { echo "::error::out/natives kosong, cek convert.log"; exit 1; }
-          cd out && 7z a "../${{ inputs.set_name }}_natives.zip" natives > /dev/null
+          [ -d ref/reframework ] && cp -r ref/reframework out/ || true
+          cd out && 7z a "../${{ inputs.set_name }}_natives.zip" natives $( [ -d reframework ] && echo reframework ) > /dev/null
 
       - name: Build REE.Packer & bikin .pak
         if: ${{ !inputs.dump_only }}
