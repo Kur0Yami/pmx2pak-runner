@@ -50,8 +50,16 @@ jobs:
       - name: Download input dari URL
         run: |
           mkdir -p work/model work/nat out
-          if [ -n "${{ inputs.model_url }}" ]; then curl -fL --retry 3 -o work/model.bin "${{ inputs.model_url }}"; else cp input/model.zip work/model.bin; fi
-          if [ -n "${{ inputs.natives_url }}" ]; then curl -fL --retry 3 -o work/nat.bin "${{ inputs.natives_url }}"; else cp input/natives.7z work/nat.bin; fi
+          MU="${{ inputs.model_url }}"; NU="${{ inputs.natives_url }}"
+          # kalau tidak ada URL dan file belum di-import ke repo -> pakai URL publik bawaan (selama repo sumber masih publik)
+          if [ -z "$MU" ] && [ ! -f input/model.zip ]; then
+            MU="https://github.com/Kur0Yami/mhgu-appearance-runner/raw/main/models/hiyuki.zip"; echo "input/model.zip belum ada -> fallback URL publik"
+          fi
+          if [ -z "$NU" ] && [ ! -f input/natives.7z ]; then
+            NU="https://github.com/Kur0Yami/MODS/raw/main/input/hiyuki.zip"; echo "input/natives.7z belum ada -> fallback URL publik"
+          fi
+          if [ -n "$MU" ]; then curl -fL --retry 3 -o work/model.bin "$MU"; else cp input/model.zip work/model.bin; fi
+          if [ -n "$NU" ]; then curl -fL --retry 3 -o work/nat.bin "$NU"; else cp input/natives.7z work/nat.bin; fi
           7z x work/model.bin -owork/model -y > /dev/null
           7z x work/nat.bin -owork/nat -y > /dev/null
           cp -r work/nat/* ref/
