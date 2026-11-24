@@ -15,6 +15,7 @@ yang ketemu dicetak ke log. Kalau export gagal, lihat bagian "RE OPS" di convert
 import sys, os, json, re, argparse, traceback, faulthandler
 faulthandler.enable(file=sys.stderr, all_threads=True)
 import bpy, bmesh, addon_utils
+from mathutils import Matrix
 
 _um = os.path.join(os.environ.get("BLENDER_USER_SCRIPTS", ""), "modules")
 if os.path.isdir(_um) and _um not in sys.path:
@@ -29,6 +30,7 @@ def parse():
     ap.add_argument("--scale", type=float, default=0.08); ap.add_argument("--hide", default="")
     ap.add_argument("--re-addon", default=""); ap.add_argument("--dump-only", default="false")
     ap.add_argument("--multi-material", action="store_true")
+    ap.add_argument("--fit", default="true"); ap.add_argument("--z-offset", type=float, default=0.0)
     a = ap.parse_args(argv)
     for k in ("pmx_dir", "ref_dir", "bonemap", "out"):
         setattr(a, k, os.path.abspath(getattr(a, k)))
@@ -36,6 +38,7 @@ def parse():
 
 
 PARENTS = {}
+PMX_HEAD_Z = [None]
 
 # import RE tanpa material/tekstur: jalur teks/GPU di background Blender diduga penyebab crash.
 # Nama material mesh diambil dari nama objek (...__ALL), jadi .mdf2 asli tetap dipakai.
@@ -135,6 +138,10 @@ def import_pmx(pmx_dir, scale, hide):
     if arm:
         PARENTS.update({b.name: (b.parent.name if b.parent else None) for b in arm.data.bones})
         log("PMX bone:", len(PARENTS))
+        hb = arm.data.bones.get("頭") or arm.data.bones.get("head")
+        if hb:
+            PMX_HEAD_Z[0] = (arm.matrix_world @ hb.head_local).z
+            log("PMX: tinggi bone kepala (m) =", round(PMX_HEAD_Z[0], 3))
     hide_set = {h.strip() for h in hide.split(",") if h.strip()}
     for o in meshes:
         if hide_set:
@@ -171,10 +178,37 @@ def dominant_part(obj, face, rules):
     return best if score[best] > 0 else None
 
 
+def bake_world(dup, src):
+    """buang parent/shape key MMD & tanam transform dunia ke vertex (supaya posisi/skala benar tanpa armature PMX)."""
+    if dup.data.shape_keys:
+        dup.shape_key_clear()
+    mw = src.matrix_world.copy()
+    dup.parent = None
+    dup.data.transform(mw)
+    dup.matrix_world = Matrix.Identity(4)
+    zs = [v.co.z for v in dup.data.vertices]
+    log(f"  mesh PMX setelah bake: z {min(zs):.3f}..{max(zs):.3f} m, tinggi {max(zs)-min(zs):.3f} m")
+
+
+def fit_to_ref(obj, arm, z_offset, do_fit):
+    """skala seragam supaya tinggi kepala PMX = Head_00 skeleton Rise, lalu telapak ke z=0 (+offset)."""
+    hb = arm.data.bones.get("Head_00")
+    if do_fit and hb and PMX_HEAD_Z[0]:
+        ref_z = (arm.matrix_world @ hb.head_local).z
+        k = ref_z / PMX_HEAD_Z[0]
+        obj.data.transform(Matrix.Scale(k, 4))
+        log(f"  fit tinggi: kepala ref {ref_z:.3f} m / PMX {PMX_HEAD_Z[0]:.3f} m -> skala {k:.3f}")
+    zs = [v.co.z for v in obj.data.vertices]
+    shift = -min(zs) + z_offset
+    obj.data.transform(Matrix.Translation((0, 0, shift)))
+    log(f"  geser z {shift:+.3f} m; hasil z {min(zs)+shift:.3f}..{max(zs)+shift:.3f} m")
+
+
 def split_parts(obj, rules, wanted):
     if len(wanted) == 1:  # mod satu-mesh (mis. f_wst279): semua faces masuk satu bagian
         dup = obj.copy(); dup.data = obj.data.copy(); dup.name = f"new_{wanted[0]}"
         bpy.context.collection.objects.link(dup)
+        bake_world(dup, obj)
         log(f"part {wanted[0]}: {len(dup.data.polygons)} faces (semua)")
         return {wanted[0]: dup}
     bm = bmesh.new(); bm.from_mesh(obj.data); bm.faces.ensure_lookup_table()
@@ -193,6 +227,7 @@ def split_parts(obj, rules, wanted):
         if not idxs:
             log("PERINGATAN: bagian kosong:", p); continue
         dup = obj.copy(); dup.data = obj.data.copy(); dup.name = f"new_{p}"
+        bake_world(dup, obj)
         bpy.context.collection.objects.link(dup)
         b = bmesh.new(); b.from_mesh(dup.data); b.faces.ensure_lookup_table()
         keep = set(idxs)
@@ -205,6 +240,17 @@ def split_parts(obj, rules, wanted):
 
 
 MAX_W = 6
+
+
+def expand_map(m):
+    """mmd_tools mengganti nama 左X/右X jadi X.L/X.R -> tambahkan varian itu ke peta."""
+    out = dict(m)
+    for k, v in m.items():
+        if k.startswith("左"):
+            out[k[1:] + ".L"] = v
+        elif k.startswith("右"):
+            out[k[1:] + ".R"] = v
+    return out
 
 
 def remap_groups(obj, bones_map, valid_bones, fallback):
@@ -352,7 +398,8 @@ def main():
         template = ref_meshes[0]
         valid = {b.name for b in arm.data.bones}
         PARENTS.clear(); PARENTS.update(PARENTS_SAVED)
-        remap_groups(nobj, bm_cfg["bones"], valid, bm_cfg.get("fallback", {}).get(p) or sorted(valid)[0])
+        fit_to_ref(nobj, arm, a.z_offset, a.fit.lower() == "true")
+        remap_groups(nobj, expand_map(bm_cfg["bones"]), valid, bm_cfg.get("fallback", {}).get(p) or sorted(valid)[0])
 
         old_idx = [f.material_index for f in nobj.data.polygons]
         remap, mat_names = assign_materials(nobj, template, single=not a.multi_material)
