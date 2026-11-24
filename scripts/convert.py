@@ -1,0 +1,250 @@
+"""
+PMX -> MH Rise armor (RE Engine) di Blender headless.
+
+Alur:
+  1. Import PMX (mmd_tools), skala ke meter.
+  2. Bagi faces ke bagian armor (helm/body/arm/waist/leg) berdasar bobot bone (bonemap.json -> "parts").
+  3. Per bagian: import mesh referensi asli Rise (ref/parts.json), buang geometrinya,
+     pasang geometri baru ke armature + nama object + material milik ref.
+  4. Remap vertex group MMD -> nama bone Rise (bonemap.json -> "bones").
+  5. Export lewat operator RE-Mesh-Editor ke out/natives/...
+
+CATATAN: nama operator addon RE-Mesh-Editor dicari otomatis (find_op) dan semua operator
+yang ketemu dicetak ke log. Kalau export gagal, lihat bagian "RE OPS" di convert.log.
+"""
+import sys, os, json, re, argparse, traceback
+import bpy, bmesh, addon_utils
+
+
+def parse():
+    argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--pmx-dir"); ap.add_argument("--ref-dir"); ap.add_argument("--bonemap")
+    ap.add_argument("--out"); ap.add_argument("--parts", default="helm,body,arm,waist,leg")
+    ap.add_argument("--scale", type=float, default=0.08); ap.add_argument("--hide", default="")
+    ap.add_argument("--re-addon", default=""); ap.add_argument("--dump-only", default="false")
+    return ap.parse_args(argv)
+
+
+def log(*a):
+    print("[pmx2pak]", *a, flush=True)
+
+
+def enable(name):
+    try:
+        addon_utils.enable(name, default_set=True, persistent=True)
+        log("addon enabled:", name)
+    except Exception as e:
+        log("GAGAL enable addon", name, e)
+
+
+def find_op(ns, *patterns):
+    """cari operator di bpy.ops.<ns> yang namanya cocok salah satu regex."""
+    names = [n for n in dir(getattr(bpy.ops, ns)) if not n.startswith("_")]
+    for p in patterns:
+        for n in names:
+            if re.search(p, n, re.I):
+                return getattr(getattr(bpy.ops, ns), n)
+    return None
+
+
+def list_re_ops():
+    log("=== RE OPS ===")
+    for ns in dir(bpy.ops):
+        if ns.startswith("re") or "mesh_editor" in ns:
+            log(ns, [n for n in dir(getattr(bpy.ops, ns)) if not n.startswith("_")])
+
+
+def clear_scene():
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+
+
+def import_pmx(pmx_dir, scale, hide):
+    pmx = None
+    for r, _, fs in os.walk(pmx_dir):
+        for f in fs:
+            if f.lower().endswith(".pmx"):
+                pmx = os.path.join(r, f); break
+        if pmx: break
+    if not pmx:
+        raise SystemExit("PMX tidak ditemukan")
+    log("PMX:", pmx)
+    bpy.ops.mmd_tools.import_model(filepath=pmx, scale=scale, types={"MESH", "ARMATURE"},
+                                   clean_model=True, remove_doubles=False)
+    meshes = [o for o in bpy.context.scene.objects if o.type == "MESH"]
+    arm = next((o for o in bpy.context.scene.objects if o.type == "ARMATURE"), None)
+    hide_set = {h.strip() for h in hide.split(",") if h.strip()}
+    for o in meshes:
+        if hide_set:
+            idx = [i for i, m in enumerate(o.data.materials) if m and m.name in hide_set]
+            if idx:
+                bm = bmesh.new(); bm.from_mesh(o.data)
+                for f in [f for f in bm.faces if f.material_index in idx]:
+                    bm.faces.remove(f)
+                bm.to_mesh(o.data); bm.free()
+    return meshes, arm
+
+
+def join_meshes(meshes):
+    bpy.ops.object.select_all(action="DESELECT")
+    for o in meshes:
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = meshes[0]
+    # bake MMD transform & modifier tidak perlu; join langsung
+    bpy.ops.object.join()
+    return bpy.context.view_layer.objects.active
+
+
+def dominant_part(obj, face, rules):
+    """bagian armor untuk satu face = bagian dgn total bobot terbesar."""
+    score = {p: 0.0 for p in rules}
+    names = {vg.index: vg.name for vg in obj.vertex_groups}
+    for vi in face.verts:
+        for g in obj.data.vertices[vi.index].groups:
+            n = names.get(g.group, "")
+            for part, bones in rules.items():
+                if n in bones:
+                    score[part] += g.weight
+    best = max(score, key=score.get)
+    return best if score[best] > 0 else None
+
+
+def split_parts(obj, rules, wanted):
+    bm = bmesh.new(); bm.from_mesh(obj.data); bm.faces.ensure_lookup_table()
+    assign = {p: [] for p in wanted}
+    unassigned = 0
+    for f in bm.faces:
+        p = dominant_part(obj, f, rules)
+        if p in assign:
+            assign[p].append(f.index)
+        else:
+            unassigned += 1
+    bm.free()
+    log("face tidak terassign ke bagian manapun:", unassigned)
+    result = {}
+    for p, idxs in assign.items():
+        if not idxs:
+            log("PERINGATAN: bagian kosong:", p); continue
+        dup = obj.copy(); dup.data = obj.data.copy(); dup.name = f"new_{p}"
+        bpy.context.collection.objects.link(dup)
+        b = bmesh.new(); b.from_mesh(dup.data); b.faces.ensure_lookup_table()
+        keep = set(idxs)
+        kill = [f for f in b.faces if f.index not in keep]
+        bmesh.ops.delete(b, geom=kill, context="FACES")
+        b.to_mesh(dup.data); b.free()
+        result[p] = dup
+        log(f"part {p}: {len(dup.data.polygons)} faces")
+    return result
+
+
+def remap_groups(obj, bones_map, valid_bones, fallback):
+    """rename/merge vertex group MMD -> bone Rise. Yang tak terpetakan -> fallback bone."""
+    miss = set()
+    for vg in list(obj.vertex_groups):
+        tgt = bones_map.get(vg.name) or ""
+        if tgt not in valid_bones:
+            miss.add(vg.name); tgt = fallback
+        if tgt == vg.name:
+            continue
+        dst = obj.vertex_groups.get(tgt) or obj.vertex_groups.new(name=tgt)
+        for v in obj.data.vertices:
+            for g in v.groups:
+                if g.group == vg.index:
+                    dst.add([v.index], g.weight, "ADD")
+        obj.vertex_groups.remove(vg)
+    if miss:
+        log(f"  {len(miss)} bone MMD tak terpetakan -> {fallback}:", sorted(miss)[:20])
+
+
+def main():
+    a = parse()
+    os.makedirs(a.out, exist_ok=True)
+    enable("mmd_tools")
+    if a.re_addon:
+        enable(a.re_addon)
+    list_re_ops()
+
+    parts_ref = json.load(open(os.path.join(a.ref_dir, "parts.json"), encoding="utf-8"))
+    bm_cfg = json.load(open(a.bonemap, encoding="utf-8"))
+    wanted = [p.strip() for p in a.parts.split(",") if p.strip()]
+
+    imp = find_op("re_mesh", r"import.*mesh", r"importmesh")
+    exp = find_op("re_mesh", r"exportfile", r"export.*mesh")
+    if not imp:
+        raise SystemExit("Operator import RE mesh tidak ketemu, cek bagian RE OPS")
+
+    # --- pass 1: dump bone ref ---
+    for p in wanted:
+        ref_path = os.path.join(a.ref_dir, parts_ref[p])
+        clear_scene(); enable("mmd_tools"); enable(a.re_addon)
+        imp(filepath=ref_path)
+        bones = sorted({b.name for o in bpy.context.scene.objects if o.type == "ARMATURE" for b in o.data.bones})
+        open(os.path.join(a.out, f"ref_bones_{p}.txt"), "w", encoding="utf-8").write("\n".join(bones))
+        log(f"ref {p}: {len(bones)} bone")
+    if a.dump_only.lower() == "true":
+        log("dump_only selesai"); return
+
+    # --- pass 2: konversi ---
+    clear_scene(); enable("mmd_tools")
+    meshes, _ = import_pmx(a.pmx_dir, a.scale, a.hide)
+    big = join_meshes(meshes)
+    new_parts = split_parts(big, bm_cfg["parts"], wanted)
+    # simpan geometri tiap bagian ke file blend sementara supaya scene ref bersih
+    tmp = os.path.join(a.out, "_new_parts.blend")
+    bpy.ops.wm.save_as_mainfile(filepath=tmp)
+
+    for p, new_obj in new_parts.items():
+        ref_path = os.path.join(a.ref_dir, parts_ref[p])
+        clear_scene(); enable("mmd_tools"); enable(a.re_addon)
+        # ambil objek bagian ini dari file sementara
+        with bpy.data.libraries.load(tmp, link=False) as (src, dst):
+            dst.objects = [f"new_{p}"]
+        nobj = dst.objects[0]
+        bpy.context.collection.objects.link(nobj)
+        imp(filepath=ref_path)
+        arm = next(o for o in bpy.context.scene.objects if o.type == "ARMATURE")
+        ref_meshes = [o for o in bpy.context.scene.objects if o.type == "MESH" and o is not nobj]
+        template = ref_meshes[0]
+        valid = {b.name for b in arm.data.bones}
+        remap_groups(nobj, bm_cfg["bones"], valid, bm_cfg.get("fallback", {}).get(p) or sorted(valid)[0])
+        # material + nama + collection milik ref
+        nobj.data.materials.clear()
+        for m in template.data.materials:
+            nobj.data.materials.append(m)
+        for f in nobj.data.polygons:
+            f.material_index = 0
+        col = template.users_collection[0]
+        old_name = template.name
+        for o in ref_meshes:
+            bpy.data.objects.remove(o, do_unlink=True)
+        for c in list(nobj.users_collection):
+            c.objects.unlink(nobj)
+        col.objects.link(nobj)
+        nobj.name = old_name
+        nobj.parent = arm
+        for mod in list(nobj.modifiers):
+            nobj.modifiers.remove(mod)
+        nobj.modifiers.new("Armature", "ARMATURE").object = arm
+        # bersihkan custom normals/doubles ringan
+        bpy.context.view_layer.objects.active = nobj
+        log(f"export {p} ...")
+        try:
+            # operator export milik addon membaca collection aktif; path tujuan ikut struktur ref
+            bpy.context.view_layer.active_layer_collection = bpy.context.view_layer.layer_collection.children.get(col.name) or bpy.context.view_layer.layer_collection
+            res = exp()
+            log("export result:", res)
+        except Exception:
+            traceback.print_exc()
+            log("EXPORT GAGAL untuk", p)
+
+    # salin hasil export ke out/natives (addon biasanya menulis di samping path ref)
+    import shutil
+    src_root = os.path.join(a.ref_dir, "natives")
+    dst_root = os.path.join(a.out, "natives")
+    if os.path.isdir(src_root):
+        shutil.copytree(src_root, dst_root, dirs_exist_ok=True)
+        log("natives disalin ke", dst_root)
+
+
+if __name__ == "__main__":
+    main()
