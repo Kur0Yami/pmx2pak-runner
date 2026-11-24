@@ -12,7 +12,8 @@ Alur:
 CATATAN: nama operator addon RE-Mesh-Editor dicari otomatis (find_op) dan semua operator
 yang ketemu dicetak ke log. Kalau export gagal, lihat bagian "RE OPS" di convert.log.
 """
-import sys, os, json, re, argparse, traceback
+import sys, os, json, re, argparse, traceback, faulthandler
+faulthandler.enable(file=sys.stderr, all_threads=True)
 import bpy, bmesh, addon_utils
 
 _um = os.path.join(os.environ.get("BLENDER_USER_SCRIPTS", ""), "modules")
@@ -32,6 +33,12 @@ def parse():
 
 
 PARENTS = {}
+
+# import RE tanpa material/tekstur: jalur teks/GPU di background Blender diduga penyebab crash.
+# Nama material mesh diambil dari nama objek (...__ALL), jadi .mdf2 asli tetap dipakai.
+IMP_FLAGS = dict(loadMaterials=False, loadMDFData=False, loadShellFur=False, loadUnusedTextures=False,
+                 importShadowMeshes=False, importBlendShapes=False, importOcclusionMeshes=False,
+                 importBoundingBoxes=False)
 
 
 def log(*a):
@@ -240,7 +247,7 @@ def tex_stem(m):
 
 def assign_materials(obj, template, single=True):
     """satu material RE per tekstur PMX (salinan material ref 'ALL')."""
-    base = template.data.materials[0]
+    base = template.data.materials[0] if template.data.materials else bpy.data.materials.new("ALL")
     log("props material ref:", base.name, list(base.keys()))
     if single:  # mode uji: pakai material ref apa adanya supaya .mdf2 asli tetap valid
         obj.data.materials.clear()
@@ -291,7 +298,7 @@ def main():
         ref_path = os.path.join(a.ref_dir, parts_ref[p])
         clear_scene()
         log("import ref (armature saja):", ref_path); sys.stdout.flush()
-        imp(filepath=ref_path, importArmatureOnly=True)
+        imp(filepath=ref_path, importArmatureOnly=True, **IMP_FLAGS)
         bones = sorted({b.name for o in bpy.context.scene.objects if o.type == "ARMATURE" for b in o.data.bones})
         open(os.path.join(a.out, f"ref_bones_{p}.txt"), "w", encoding="utf-8").write("\n".join(bones))
         log(f"ref {p}: {len(bones)} bone")
@@ -315,8 +322,7 @@ def main():
         nobj = dst.objects[0]
         bpy.context.scene.collection.objects.link(nobj)
         log("import ref lengkap:", ref_path); sys.stdout.flush()
-        imp(filepath=ref_path, loadMaterials=True, loadMDFData=True, loadUnusedTextures=False,
-            importShadowMeshes=False, importBlendShapes=False, clearScene=False)
+        imp(filepath=ref_path, clearScene=False, **IMP_FLAGS)
         dump_scene("setelah import ref " + p)
         arms = [o for o in bpy.context.scene.objects if o.type == "ARMATURE"]
         if not arms:
