@@ -87,6 +87,12 @@ def list_re_ops():
             log(ns, [n for n in dir(getattr(bpy.ops, ns)) if not n.startswith("_")])
 
 
+def re_import(imp, path, **kw):
+    """operator import RE membaca 'directory' + 'files', BUKAN 'filepath' (kalau tidak, tidak ada yang diimpor)."""
+    d, f = os.path.split(os.path.normpath(path))
+    return imp(directory=d + os.sep, files=[{"name": f}], **kw)
+
+
 def clear_scene():
     for o in list(bpy.data.objects):
         if not o.get("p2p_keep"):
@@ -310,7 +316,7 @@ def main():
         ref_path = os.path.join(a.ref_dir, parts_ref[p])
         clear_scene()
         log("import ref (armature saja):", ref_path); sys.stdout.flush()
-        imp(filepath=ref_path, importArmatureOnly=True, **IMP_FLAGS)
+        re_import(imp, ref_path, importArmatureOnly=True, **IMP_FLAGS)
         bones = sorted({b.name for ar in bpy.data.armatures for b in ar.bones})
         open(os.path.join(a.out, f"ref_bones_{p}.txt"), "w", encoding="utf-8").write("\n".join(bones))
         log(f"ref {p}: {len(bones)} bone")
@@ -334,7 +340,7 @@ def main():
             c.objects.unlink(nobj)
         bpy.context.scene.collection.objects.link(nobj)
         log("import ref lengkap:", ref_path); sys.stdout.flush()
-        imp(filepath=ref_path, clearScene=False, **IMP_FLAGS)
+        re_import(imp, ref_path, clearScene=False, **IMP_FLAGS)
         dump_scene("setelah import ref " + p)
         arms = [o for o in bpy.data.objects if o.type == "ARMATURE" and not o.get("p2p_keep")]
         if not arms:
