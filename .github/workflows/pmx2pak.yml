@@ -1,0 +1,123 @@
+name: pmx2pak
+
+# MH Rise (Sunbreak) armor: PMX -> .mesh/.mdf2/.tex -> natives zip + .pak
+# Jalan di windows-latest karena konversi .tex (texconv) hanya ada versi Windows.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_zip:
+        description: "Zip PMX + tekstur (path di repo)"
+        default: "input/model.zip"
+      set_name:
+        description: "Nama set (dipakai buat nama file output)"
+        default: "guild_custom"
+      parts:
+        description: "Bagian armor, pisah koma (harus ada di ref/parts.json)"
+        default: "helm,body,arm,waist,leg"
+      scale:
+        description: "Skala PMX -> meter (MMD standar ~0.08)"
+        default: "0.08"
+      hide_materials:
+        description: "Nama material PMX yang dibuang, pisah koma (opsional)"
+        default: ""
+      dump_only:
+        description: "true = cuma dump daftar bone ref (buat isi bonemap.json), tidak export"
+        type: boolean
+        default: false
+      blender_version:
+        description: "Versi Blender (zip portable)"
+        default: "4.2.3"
+      mesh_editor_ref:
+        description: "Branch/tag RE-Mesh-Editor"
+        default: "main"
+      pak_patch_no:
+        description: "Nomor patch pak (re_chunk_000.pak.patch_XXX.pak)"
+        default: "099"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Siapkan input
+        run: |
+          mkdir -p work/model out
+          7z x "${{ inputs.model_zip }}" -owork/model -y > /dev/null
+          find work/model -iname "*.pmx" | head
+          test -f ref/parts.json || { echo "::error::ref/parts.json belum ada"; exit 1; }
+
+      - name: Install Blender (portable)
+        run: |
+          V="${{ inputs.blender_version }}"
+          MAJ="${V%.*}"
+          curl -fsSL -o blender.zip "https://download.blender.org/release/Blender${MAJ}/blender-${V}-windows-x64.zip"
+          7z x blender.zip -oblender -y > /dev/null
+          BL=$(find blender -maxdepth 2 -name blender.exe | head -1)
+          echo "BLENDER=$(pwd)/$BL" >> $GITHUB_ENV
+          echo "BLVER=$MAJ" >> $GITHUB_ENV
+
+      - name: Install addon (mmd_tools + RE-Mesh-Editor)
+        run: |
+          ADDONS="$(dirname "$BLENDER")/$BLVER/scripts/addons"
+          mkdir -p "$ADDONS"
+          git clone --depth 1 https://github.com/UuuNyaa/blender_mmd_tools.git work/mmd
+          cp -r work/mmd/mmd_tools "$ADDONS/mmd_tools"
+          git clone --depth 1 --branch "${{ inputs.mesh_editor_ref }}" https://github.com/NSACloud/RE-Mesh-Editor.git work/remesh
+          # cari folder addon (yang punya __init__.py + bl_info), nama folder dipertahankan
+          INIT=$(grep -rl "bl_info" work/remesh --include=__init__.py | head -1)
+          SRC=$(dirname "$INIT")
+          NAME=$(basename "$SRC")
+          echo "RE addon folder: $SRC -> $NAME"
+          cp -r "$SRC" "$ADDONS/$NAME"
+          echo "RE_ADDON=$NAME" >> $GITHUB_ENV
+
+      - name: Konversi PMX -> RE mesh
+        run: |
+          "$BLENDER" -b --factory-startup -P scripts/convert.py -- \
+            --pmx-dir work/model \
+            --ref-dir ref \
+            --bonemap scripts/bonemap.json \
+            --out out \
+            --parts "${{ inputs.parts }}" \
+            --scale "${{ inputs.scale }}" \
+            --hide "${{ inputs.hide_materials }}" \
+            --re-addon "$RE_ADDON" \
+            --dump-only "${{ inputs.dump_only }}" 2>&1 | tee out/convert.log
+
+      - name: Susun natives + zip (Fluffy Mod Manager)
+        if: ${{ !inputs.dump_only }}
+        run: |
+          test -d out/natives || { echo "::error::out/natives kosong, cek convert.log"; exit 1; }
+          cd out && 7z a "../${{ inputs.set_name }}_natives.zip" natives > /dev/null
+
+      - name: Build REE.Packer & bikin .pak
+        if: ${{ !inputs.dump_only }}
+        continue-on-error: true
+        run: |
+          git clone --depth 1 https://github.com/Ekey/REE.PAK.Tool.git work/pakTool
+          PROJ=$(find work/pakTool -iname "REE.Packer*.csproj" | head -1)
+          echo "Packer project: $PROJ"
+          dotnet build "$PROJ" -c Release -o work/packer
+          PACKER=$(find work/packer -iname "REE.Packer.exe" | head -1)
+          PAK="re_chunk_000.pak.patch_${{ inputs.pak_patch_no }}.pak"
+          mkdir -p pakroot && cp -r out/natives pakroot/
+          "$PACKER" "pakroot" "$PAK"
+          ls -la "$PAK"
+          mkdir -p dist && mv "$PAK" dist/
+
+      - name: Upload hasil
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ inputs.set_name }}
+          path: |
+            dist/*.pak
+            ${{ inputs.set_name }}_natives.zip
+            out/convert.log
+            out/ref_bones_*.txt
+          if-no-files-found: warn
