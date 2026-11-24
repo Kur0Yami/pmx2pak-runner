@@ -272,6 +272,13 @@ def main():
     enable("mmd_tools")
     if a.re_addon:
         enable(a.re_addon)
+        # penyebab crash: addon memanggil bpy.ops.wm.console_toggle() (showConsole) -> access violation di mode background
+        try:
+            prefs = bpy.context.preferences.addons[a.re_addon].preferences
+            prefs.showConsole = False
+            log("RE addon: showConsole = False")
+        except Exception as e:
+            log("gagal set showConsole:", e)
     list_re_ops()
 
     parts_ref = json.load(open(os.path.join(a.ref_dir, "parts.json"), encoding="utf-8"))
