@@ -55,6 +55,16 @@ def find_op(ns, *patterns):
     return None
 
 
+def describe(label, op):
+    """log nama+default properti operator (buat debug versi addon)."""
+    try:
+        props = op.get_rna_type().properties
+        d = {x.identifier: str(getattr(x, "default", ""))[:30] for x in props if x.identifier != "rna_type"}
+        log("OP", label, d)
+    except Exception as e:
+        log("describe gagal", label, e)
+
+
 def list_re_ops():
     log("=== RE OPS ===")
     for ns in dir(bpy.ops):
@@ -76,8 +86,10 @@ def import_pmx(pmx_dir, scale, hide):
     if not pmx:
         raise SystemExit("PMX tidak ditemukan")
     log("PMX:", pmx)
-    bpy.ops.mmd_tools.import_model(filepath=pmx, scale=scale, types={"MESH", "ARMATURE"},
-                                   clean_model=True, remove_doubles=False)
+    try:
+        bpy.ops.mmd_tools.import_model(filepath=pmx, scale=scale, types={"MESH", "ARMATURE"})
+    except TypeError:
+        bpy.ops.mmd_tools.import_model(filepath=pmx, scale=scale)
     meshes = [o for o in bpy.context.scene.objects if o.type == "MESH"]
     arm = next((o for o in bpy.context.scene.objects if o.type == "ARMATURE"), None)
     if arm:
@@ -233,10 +245,19 @@ def main():
     bm_cfg = json.load(open(a.bonemap, encoding="utf-8"))
     wanted = [p.strip() for p in a.parts.split(",") if p.strip()]
 
-    imp = find_op("re_mesh", r"import.*mesh", r"importmesh")
-    exp = find_op("re_mesh", r"exportfile", r"export.*mesh")
+    if not hasattr(bpy.ops, "mmd_tools"):
+        raise SystemExit("mmd_tools tidak termuat (lihat log enable di atas)")
+    imp = find_op("re_mesh", r"^importfile$")
+    exp = find_op("re_mesh", r"^exportfile$")
     if not imp:
         raise SystemExit("Operator import RE mesh tidak ketemu, cek bagian RE OPS")
+    describe("re_mesh.importfile", imp); describe("re_mesh.exportfile", exp)
+    for ns, nm in (("re_mdf", "importfile"), ("re_mdf", "exportfile"), ("re_tex", "convert_tex_dds_files"),
+                   ("re_mesh", "create_mesh_collection"), ("re_mdf", "replace_texture_bindings")):
+        try:
+            describe(f"{ns}.{nm}", getattr(getattr(bpy.ops, ns), nm))
+        except Exception as e:
+            log("skip describe", ns, nm, e)
 
     # --- pass 1: dump bone ref ---
     for p in wanted:
@@ -312,4 +333,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        traceback.print_exc()
+        sys.exit(1)
