@@ -7,11 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       model_url:
-        description: "URL zip PMX + tekstur (repo publik)"
-        default: "https://github.com/Kur0Yami/mhgu-appearance-runner/raw/main/models/hiyuki.zip"
+        description: "URL zip PMX (kosong = pakai input/model.zip di repo ini)"
+        default: ""
       natives_url:
-        description: "URL mod natives (zip/7z) yang dipakai sebagai referensi"
-        default: "https://github.com/Kur0Yami/MODS/raw/main/input/hiyuki.zip"
+        description: "URL mod natives (kosong = pakai input/natives.7z di repo ini)"
+        default: ""
       set_name:
         description: "Nama set (dipakai buat nama file output)"
         default: "hiyuki_new"
@@ -50,8 +50,8 @@ jobs:
       - name: Download input dari URL
         run: |
           mkdir -p work/model work/nat out
-          curl -fL --retry 3 -o work/model.bin "${{ inputs.model_url }}"
-          curl -fL --retry 3 -o work/nat.bin "${{ inputs.natives_url }}"
+          if [ -n "${{ inputs.model_url }}" ]; then curl -fL --retry 3 -o work/model.bin "${{ inputs.model_url }}"; else cp input/model.zip work/model.bin; fi
+          if [ -n "${{ inputs.natives_url }}" ]; then curl -fL --retry 3 -o work/nat.bin "${{ inputs.natives_url }}"; else cp input/natives.7z work/nat.bin; fi
           7z x work/model.bin -owork/model -y > /dev/null
           7z x work/nat.bin -owork/nat -y > /dev/null
           cp -r work/nat/* ref/
@@ -77,6 +77,10 @@ jobs:
           echo "BLENDER_USER_SCRIPTS=$SCR" >> $GITHUB_ENV
           echo "BLENDER_USER_EXTENSIONS=$EXT" >> $GITHUB_ENV
           export BLENDER_USER_SCRIPTS="$SCR" BLENDER_USER_EXTENSIONS="$EXT"
+          # mmd_tools butuh modul 'opencc' (tidak ada di python bawaan Blender)
+          PY="$(dirname "$BLENDER")/$BLVER/python/bin/python.exe"
+          "$PY" -m ensurepip --upgrade || true
+          "$PY" -m pip install --quiet --target "$SCR/modules" opencc-python-reimplemented
           git clone --depth 1 https://github.com/UuuNyaa/blender_mmd_tools.git work/mmd
           git clone --depth 1 --branch "${{ inputs.mesh_editor_ref }}" https://github.com/NSACloud/RE-Mesh-Editor.git work/remesh
           rm -rf work/mmd/.git work/remesh/.git
