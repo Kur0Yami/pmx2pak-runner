@@ -1,0 +1,34 @@
+name: import-sources
+
+# Jalankan SEKALI: salin PMX + natives mod dari URL (repo publik) ke repo ini.
+# Setelah selesai, repo sumber boleh di-private-kan.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_url:
+        description: "URL zip PMX"
+        default: "https://github.com/Kur0Yami/mhgu-appearance-runner/raw/main/models/hiyuki.zip"
+      natives_url:
+        description: "URL mod natives (7z/zip)"
+        default: "https://github.com/Kur0Yami/MODS/raw/main/input/hiyuki.zip"
+
+permissions:
+  contents: write
+
+jobs:
+  imp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download & commit
+        run: |
+          mkdir -p input
+          curl -fL --retry 3 -o input/model.zip "${{ inputs.model_url }}"
+          curl -fL --retry 3 -o input/natives.7z "${{ inputs.natives_url }}"
+          ls -la input
+          git config user.name "github-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git add input/model.zip input/natives.7z
+          git commit -m "import sources" || echo "tidak ada perubahan"
+          git push
