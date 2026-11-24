@@ -34,11 +34,15 @@ def log(*a):
 
 
 def enable(name):
-    try:
-        addon_utils.enable(name, default_set=True, persistent=True)
-        log("addon enabled:", name)
-    except Exception as e:
-        log("GAGAL enable addon", name, e)
+    for n in (name, "bl_ext.user_default." + name):
+        try:
+            if addon_utils.enable(n, default_set=True, persistent=True):
+                log("addon enabled:", n)
+                return True
+        except Exception as e:
+            log("enable error", n, e)
+    log("GAGAL enable addon", name, "| paths:", addon_utils.paths())
+    return False
 
 
 def find_op(ns, *patterns):
@@ -54,7 +58,7 @@ def find_op(ns, *patterns):
 def list_re_ops():
     log("=== RE OPS ===")
     for ns in dir(bpy.ops):
-        if ns.startswith("re") or "mesh_editor" in ns:
+        if ns.startswith("re_") or ns.startswith("mmd") or "mesh" in ns:
             log(ns, [n for n in dir(getattr(bpy.ops, ns)) if not n.startswith("_")])
 
 
