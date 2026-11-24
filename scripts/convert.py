@@ -29,7 +29,10 @@ def parse():
     ap.add_argument("--scale", type=float, default=0.08); ap.add_argument("--hide", default="")
     ap.add_argument("--re-addon", default=""); ap.add_argument("--dump-only", default="false")
     ap.add_argument("--multi-material", action="store_true")
-    return ap.parse_args(argv)
+    a = ap.parse_args(argv)
+    for k in ("pmx_dir", "ref_dir", "bonemap", "out"):
+        setattr(a, k, os.path.abspath(getattr(a, k)))
+    return a
 
 
 PARENTS = {}
@@ -86,12 +89,14 @@ def list_re_ops():
 
 def clear_scene():
     for o in list(bpy.data.objects):
-        bpy.data.objects.remove(o, do_unlink=True)
+        if not o.get("p2p_keep"):
+            bpy.data.objects.remove(o, do_unlink=True)
     for c in list(bpy.data.collections):
         bpy.data.collections.remove(c)
     for blk in (bpy.data.meshes, bpy.data.armatures, bpy.data.materials, bpy.data.images):
         for d in list(blk):
-            blk.remove(d)
+            if d.users == 0:
+                blk.remove(d)
 
 
 def dump_scene(tag):
@@ -306,7 +311,7 @@ def main():
         clear_scene()
         log("import ref (armature saja):", ref_path); sys.stdout.flush()
         imp(filepath=ref_path, importArmatureOnly=True, **IMP_FLAGS)
-        bones = sorted({b.name for o in bpy.context.scene.objects if o.type == "ARMATURE" for b in o.data.bones})
+        bones = sorted({b.name for ar in bpy.data.armatures for b in ar.bones})
         open(os.path.join(a.out, f"ref_bones_{p}.txt"), "w", encoding="utf-8").write("\n".join(bones))
         log(f"ref {p}: {len(bones)} bone")
     if a.dump_only.lower() == "true":
@@ -317,25 +322,25 @@ def main():
     meshes, _ = import_pmx(a.pmx_dir, a.scale, a.hide)
     big = join_meshes(meshes)
     new_parts = split_parts(big, bm_cfg["parts"], wanted)
-    tmp = os.path.join(a.out, "_new_parts.blend")
-    bpy.ops.wm.save_as_mainfile(filepath=tmp)
     PARENTS_SAVED = dict(PARENTS)
+    for o in new_parts.values():
+        o["p2p_keep"] = True
+    clear_scene()  # buang PMX asli, sisakan bagian baru
 
-    for p, new_obj in new_parts.items():
+    for p, nobj in new_parts.items():
         ref_path = os.path.join(a.ref_dir, parts_ref[p])
         clear_scene()
-        with bpy.data.libraries.load(tmp, link=False) as (src, dst):
-            dst.objects = [f"new_{p}"]
-        nobj = dst.objects[0]
+        for c in list(nobj.users_collection):
+            c.objects.unlink(nobj)
         bpy.context.scene.collection.objects.link(nobj)
         log("import ref lengkap:", ref_path); sys.stdout.flush()
         imp(filepath=ref_path, clearScene=False, **IMP_FLAGS)
         dump_scene("setelah import ref " + p)
-        arms = [o for o in bpy.context.scene.objects if o.type == "ARMATURE"]
+        arms = [o for o in bpy.data.objects if o.type == "ARMATURE" and not o.get("p2p_keep")]
         if not arms:
             raise SystemExit("armature ref tidak ada")
         arm = arms[0]
-        ref_meshes = [o for o in bpy.context.scene.objects if o.type == "MESH" and o is not nobj]
+        ref_meshes = [o for o in bpy.data.objects if o.type == "MESH" and not o.get("p2p_keep")]
         if not ref_meshes:
             raise SystemExit("mesh ref tidak ada")
         template = ref_meshes[0]
