@@ -71,18 +71,29 @@ jobs:
 
       - name: Install addon (mmd_tools + RE-Mesh-Editor)
         run: |
-          ADDONS="$(dirname "$BLENDER")/$BLVER/scripts/addons"
-          mkdir -p "$ADDONS"
+          # Blender 4.2 tidak membaca <install>/scripts/addons -> pakai user scripts dir via env
+          SCR="$(pwd -W)/bscripts"; EXT="$(pwd -W)/bext"
+          mkdir -p "$SCR/addons" "$EXT"
+          echo "BLENDER_USER_SCRIPTS=$SCR" >> $GITHUB_ENV
+          echo "BLENDER_USER_EXTENSIONS=$EXT" >> $GITHUB_ENV
+          export BLENDER_USER_SCRIPTS="$SCR" BLENDER_USER_EXTENSIONS="$EXT"
           git clone --depth 1 https://github.com/UuuNyaa/blender_mmd_tools.git work/mmd
-          cp -r work/mmd/mmd_tools "$ADDONS/mmd_tools"
           git clone --depth 1 --branch "${{ inputs.mesh_editor_ref }}" https://github.com/NSACloud/RE-Mesh-Editor.git work/remesh
-          # cari folder addon (yang punya __init__.py + bl_info), nama folder dipertahankan
+          rm -rf work/mmd/.git work/remesh/.git
+          # mmd_tools: legacy kalau ada bl_info, kalau tidak -> extension
+          if grep -q "bl_info" work/mmd/mmd_tools/__init__.py; then
+            cp -r work/mmd/mmd_tools "$SCR/addons/mmd_tools"; echo "mmd_tools: legacy"
+          else
+            (cd work/mmd/mmd_tools && 7z a ../../mmd_tools.zip . > /dev/null)
+            "$BLENDER" --command extension install-file -r user_default work/mmd_tools.zip
+            echo "mmd_tools: extension"
+          fi
+          # RE-Mesh-Editor: cari folder addon (punya bl_info)
           INIT=$(grep -rl "bl_info" work/remesh --include=__init__.py | head -1)
-          SRC=$(dirname "$INIT")
-          NAME=$(basename "$SRC")
-          echo "RE addon folder: $SRC -> $NAME"
-          cp -r "$SRC" "$ADDONS/$NAME"
-          echo "RE_ADDON=$NAME" >> $GITHUB_ENV
+          echo "RE addon src: $(dirname "$INIT")"
+          cp -r "$(dirname "$INIT")" "$SCR/addons/re_mesh_editor"
+          echo "RE_ADDON=re_mesh_editor" >> $GITHUB_ENV
+          find "$SCR/addons" -maxdepth 2 -name "__init__.py"
 
       - name: Konversi PMX -> RE mesh
         run: |
