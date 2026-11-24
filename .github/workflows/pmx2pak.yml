@@ -120,6 +120,13 @@ jobs:
             --re-addon "$RE_ADDON" \
             --dump-only "${{ inputs.dump_only }}" 2>&1 | tee out/convert.log
 
+      - name: Ambil crash log Blender (kalau ada)
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p out
+          cp "$TEMP/blender.crash.txt" out/blender.crash.txt 2>/dev/null || cp /c/Users/RUNNER~1/AppData/Local/Temp/blender.crash.txt out/ 2>/dev/null || echo "tidak ada crash log"
+
       - name: Susun natives + zip (Fluffy Mod Manager)
         if: ${{ !inputs.dump_only }}
         run: |
@@ -151,5 +158,6 @@ jobs:
             dist/*.pak
             ${{ inputs.set_name }}_natives.zip
             out/convert.log
+            out/blender.crash.txt
             out/ref_bones_*.txt
           if-no-files-found: warn
