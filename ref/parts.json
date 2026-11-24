@@ -1,8 +1,4 @@
 {
-  "_catatan": "Isi path file .mesh ASLI Rise (relatif ke folder ref/), satu per bagian. Struktur natives/STM/... ikut folder asli game.",
-  "helm":  "natives/STM/.../ISI_SENDIRI.mesh.XXXXXXXX",
-  "body":  "natives/STM/.../ISI_SENDIRI.mesh.XXXXXXXX",
-  "arm":   "natives/STM/.../ISI_SENDIRI.mesh.XXXXXXXX",
-  "waist": "natives/STM/.../ISI_SENDIRI.mesh.XXXXXXXX",
-  "leg":   "natives/STM/.../ISI_SENDIRI.mesh.XXXXXXXX"
+ "_catatan": "Mod hiyuki: seluruh model ada di f_wst279; part lain hanya stub kosong (540 byte).",
+ "wst": "natives/STM/player/mod/f/pl279/f_wst279.mesh.2109148288"
 }
